@@ -133,6 +133,16 @@ h1 .accent { color: var(--accent); }
 .private-note { margin: -4px 0 4px; font-size: 13px; color: var(--muted); }
 .payouts .line:last-child { border-bottom: 0; }
 
+.sheet { background: var(--msg-bg); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 14px; }
+.sheet-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; border-bottom: 2px solid var(--accent); padding-bottom: 10px; }
+.sheet-head b { font-family: var(--font-display); font-size: 20px; letter-spacing: .04em; color: var(--accent); margin-right: 10px; }
+.sheet-head span { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.sheet-total { font-family: var(--font-display); font-weight: 700; font-size: 20px; font-variant-numeric: tabular-nums; }
+.sheet-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 16px; margin: 0; }
+.sheet-meta dt { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+.sheet-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.sheet-note { margin: 0; font-size: 13px; color: var(--muted); }
+
 .tabs { display: inline-flex; padding: 3px; gap: 3px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
 .tabs button {
   font: inherit; font-size: 13.5px; font-weight: 600; border: 0; background: transparent; color: var(--muted);
@@ -183,13 +193,13 @@ pre#message {
         </label>
         <div class="row">
           <label class="f f-date" for="eventDate">Date
-            <input type="date" id="eventDate" value="2026-11-14">
+            <input type="date" id="eventDate" value="">
           </label>
           <label class="f" for="startTime">Start
-            <input type="time" id="startTime" value="10:00" step="900">
+            <input type="time" id="startTime" value="" step="900">
           </label>
           <label class="f" for="endTime">Finish
-            <input type="time" id="endTime" value="16:00" step="900">
+            <input type="time" id="endTime" value="" step="900">
           </label>
         </div>
         <p class="err" id="timeErr" hidden></p>
@@ -248,18 +258,34 @@ pre#message {
         <div class="tabs" role="tablist" aria-label="Message format">
           <button type="button" role="tab" id="tabWa" aria-selected="true">WhatsApp</button>
           <button type="button" role="tab" id="tabEmail" aria-selected="false">Email</button>
+          <button type="button" role="tab" id="tabPdf" aria-selected="false">PDF invoice</button>
         </div>
       </div>
       <pre id="message" tabindex="0"></pre>
+      <div class="sheet" id="pdfPanel" hidden>
+        <div class="sheet-head">
+          <div><b>INVOICE</b><span id="pvNo"></span></div>
+          <div class="sheet-total" id="pvTotal"></div>
+        </div>
+        <dl class="sheet-meta">
+          <dt>Bill to</dt><dd id="pvTo"></dd>
+          <dt>Event</dt><dd id="pvEvent"></dd>
+          <dt>When</dt><dd id="pvWhen"></dd>
+        </dl>
+        <p class="sheet-note">The PDF lists each crew role with hours and rates, any discount, the total due and your bank details, with the church logo at the top.</p>
+      </div>
       <div class="actions">
         <button type="button" class="btn" id="copyBtn">Copy message</button>
         <button type="button" class="btn ghost" id="copySubject" hidden>Copy subject line</button>
+        <button type="button" class="btn" id="pdfBtn" hidden>Download PDF invoice</button>
+        <button type="button" class="btn ghost" id="sharePdfBtn" hidden>Share PDF</button>
         <span class="status" id="status" role="status"></span>
       </div>
     </section>
   </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 const RATE = 50;
 const BANK = {
@@ -452,10 +478,166 @@ function render() {
     d.append(w, a); payouts.appendChild(d);
   });
 
-  $("message").textContent = buildMessage(inp, q);
+  const isPdf = format === "pdf";
+  $("message").hidden = isPdf;
+  $("pdfPanel").hidden = !isPdf;
+  $("copyBtn").hidden = isPdf;
   $("copySubject").hidden = format !== "email";
-  $("copyBtn").textContent = format === "wa" ? "Copy WhatsApp message" : "Copy email";
+  $("pdfBtn").hidden = !isPdf;
+  $("sharePdfBtn").hidden = !isPdf || !canSharePdf();
+  if (isPdf) {
+    $("pvNo").textContent = invoiceNo(inp);
+    $("pvTotal").textContent = gbp(q.total);
+    $("pvTo").textContent = inp.client || "Not entered";
+    $("pvEvent").textContent = inp.event || "Not entered";
+    $("pvWhen").textContent = whenText(inp, q) || "Not entered";
+  } else {
+    $("message").textContent = buildMessage(inp, q);
+    $("copyBtn").textContent = format === "wa" ? "Copy WhatsApp message" : "Copy email";
+  }
   $("status").textContent = "";
+}
+
+// ---------- PDF invoice ----------
+
+function whenText(inp, q) {
+  const parts = [];
+  if (inp.date) parts.push(fmtDate(inp.date));
+  if (inp.start && inp.end) parts.push(fmtTime(inp.start) + " - " + fmtTime(inp.end) + (q.overnight ? " (next day)" : "") + ", " + fmtHours(q.hours));
+  return parts.join(", ");
+}
+
+// Built from the event date and start time, so the same booking always gets the same number.
+function invoiceNo(inp) {
+  const now = new Date();
+  const d = inp.date ? inp.date.replace(/-/g, "") :
+    now.getFullYear() + String(now.getMonth() + 1).padStart(2, "0") + String(now.getDate()).padStart(2, "0");
+  return "NCC-" + d + (inp.start ? "-" + inp.start.replace(":", "") : "");
+}
+
+function pdfFileName(inp) {
+  const name = (inp.event || "Event").replace(/[\\/:*?"<>|]+/g, "").trim();
+  return "Invoice - " + name + (inp.date ? " - " + inp.date : "") + ".pdf";
+}
+
+function canSharePdf() {
+  try {
+    return !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.pdf", { type: "application/pdf" })] }));
+  } catch (e) { return false; }
+}
+
+function makePdf() {
+  const inp = readInput(), q = buildQuote(inp);
+  const doc = new window.jspdf.jsPDF({ unit: "mm", format: "a4" });
+  const W = 210, M = 18, R = W - M;
+  const BLUE = [26, 79, 196], RED = [208, 20, 30], INK = [23, 32, 44], MUTED = [91, 102, 118], LINE = [215, 221, 230], TINT = [238, 243, 252];
+  const money = n => gbp(n);
+  const issued = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+
+  doc.setFillColor(...BLUE); doc.rect(0, 0, W, 5, "F");
+
+  const logo = document.querySelector(".logo");
+  if (logo) doc.addImage(logo.src, "JPEG", M, 14, 26, 26);
+  doc.setTextColor(...INK); doc.setFont("helvetica", "bold"); doc.setFontSize(14);
+  doc.text("New Covenant Church Bermondsey", M + 31, 24);
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text("Technical Team", M + 31, 30);
+
+  doc.setFont("helvetica", "bold"); doc.setFontSize(24); doc.setTextColor(...BLUE);
+  doc.text("INVOICE", R, 24, { align: "right" });
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text("Invoice no. " + invoiceNo(inp), R, 31, { align: "right" });
+  doc.text("Issued " + issued, R, 36, { align: "right" });
+
+  // Bill to and event details
+  let y = 54;
+  const label = (t, x, yy) => { doc.setFont("helvetica", "bold"); doc.setFontSize(8); doc.setTextColor(...MUTED); doc.text(t.toUpperCase(), x, yy); };
+  const body = (t, x, yy, w) => {
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+    const lines = doc.splitTextToSize(t, w); doc.text(lines, x, yy); return lines.length;
+  };
+  label("Bill to", M, y);
+  label("Event", 98, y);
+  const nTo = body(inp.client || "-", M, y + 6, 70);
+  let nEv = body(inp.event || "-", 98, y + 6, R - 98);
+  let ey = y + 6 + nEv * 5;
+  doc.setTextColor(...MUTED); doc.setFontSize(10);
+  if (inp.date) { doc.text(fmtDate(inp.date), 98, ey); ey += 5; }
+  if (inp.start && inp.end) { doc.text(fmtTime(inp.start) + " - " + fmtTime(inp.end) + (q.overnight ? " (next day)" : ""), 98, ey); ey += 5; }
+  y = Math.max(y + 6 + nTo * 5, ey) + 10;
+
+  // Line items
+  const cDesc = M + 4, cHrs = 128, cRate = 156, cAmt = R - 4;
+  doc.setFillColor(...BLUE); doc.rect(M, y, R - M, 9, "F");
+  doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
+  doc.text("DESCRIPTION", cDesc, y + 6);
+  doc.text("HOURS", cHrs, y + 6, { align: "right" });
+  doc.text("RATE", cRate, y + 6, { align: "right" });
+  doc.text("AMOUNT", cAmt, y + 6, { align: "right" });
+  y += 9;
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+  q.items.forEach((i, n) => {
+    if (n % 2 === 1) { doc.setFillColor(...TINT); doc.rect(M, y, R - M, 10, "F"); }
+    doc.text(i.role, cDesc, y + 6.5);
+    doc.text(String(Math.round(i.hours * 100) / 100), cHrs, y + 6.5, { align: "right" });
+    doc.text(money(RATE) + "/hr", cRate, y + 6.5, { align: "right" });
+    doc.text(money(i.cost), cAmt, y + 6.5, { align: "right" });
+    y += 10;
+  });
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y, R, y);
+
+  // Totals
+  y += 8;
+  const tl = 128;
+  const totalRow = (t, v, colour) => {
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10.5); doc.setTextColor(...(colour || INK));
+    doc.text(t, tl, y); doc.text(v, cAmt, y, { align: "right" }); y += 6.5;
+  };
+  if (q.discount > 0) {
+    totalRow("Subtotal", money(q.subtotal));
+    totalRow("Discount (" + inp.discount + "%)", "-" + money(q.discount), [31, 122, 77]);
+  }
+  y += 1;
+  doc.setFillColor(...BLUE); doc.rect(tl - 4, y - 5, R - tl + 4, 12, "F");
+  doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(255, 255, 255);
+  doc.text("Total due", tl, y + 2.5);
+  doc.text(money(q.total), cAmt, y + 2.5, { align: "right" });
+  y += 22;
+
+  // Payment details
+  doc.setFillColor(...TINT); doc.setDrawColor(...LINE);
+  doc.roundedRect(M, y, R - M, 40, 2, 2, "FD");
+  label("Payment details", M + 6, y + 8);
+  const pay = [
+    ["Account name", BANK.name], ["Bank", BANK.bank], ["Sort code", BANK.sort],
+    ["Account number", BANK.acct], ["Reference", inp.event ? inp.event.slice(0, 18) : "Event name"]
+  ];
+  doc.setFontSize(10.5);
+  pay.forEach(([k, v], n) => {
+    doc.setFont("helvetica", "normal"); doc.setTextColor(...MUTED); doc.text(k, M + 6, y + 15 + n * 5.5);
+    doc.setFont("helvetica", "bold"); doc.setTextColor(...INK); doc.text(v, M + 46, y + 15 + n * 5.5);
+  });
+  y += 52;
+
+  doc.setFont("helvetica", "normal"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+  doc.text("Thank you for booking the Technical Team. Please pay by bank transfer using the reference above.", M, y, { maxWidth: R - M });
+
+  // Footer
+  doc.setDrawColor(...LINE); doc.line(M, 280, R, 280);
+  doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text("Anthony Omisade  |  New Covenant Church Bermondsey Technical Team", M, 286);
+  doc.setTextColor(...RED); doc.text("God bless", R, 286, { align: "right" });
+
+  return { doc, name: pdfFileName(inp) };
+}
+
+function pdfReady() {
+  const st = $("status");
+  st.classList.add("warn");
+  if (!window.jspdf) { st.textContent = "The PDF maker didn't load. Check your internet connection and reload the page."; return false; }
+  if (!$("needSound").checked && !$("needCamera").checked) { st.textContent = "Tick at least one crew role first."; return false; }
+  st.classList.remove("warn");
+  return true;
 }
 
 function selectText(el) {
@@ -481,8 +663,29 @@ $("form").addEventListener("input", render);
 $("form").addEventListener("change", render);
 $("form").addEventListener("submit", e => e.preventDefault());
 
-$("tabWa").addEventListener("click", () => { format = "wa"; $("tabWa").setAttribute("aria-selected", "true"); $("tabEmail").setAttribute("aria-selected", "false"); render(); });
-$("tabEmail").addEventListener("click", () => { format = "email"; $("tabEmail").setAttribute("aria-selected", "true"); $("tabWa").setAttribute("aria-selected", "false"); render(); });
+const TABS = { wa: "tabWa", email: "tabEmail", pdf: "tabPdf" };
+Object.entries(TABS).forEach(([f, id]) => $(id).addEventListener("click", () => {
+  format = f;
+  Object.values(TABS).forEach(t => $(t).setAttribute("aria-selected", String(t === id)));
+  render();
+}));
+
+$("pdfBtn").addEventListener("click", () => {
+  if (!pdfReady()) return;
+  const { doc, name } = makePdf();
+  doc.save(name);
+  $("status").textContent = "PDF invoice created";
+});
+$("sharePdfBtn").addEventListener("click", async () => {
+  if (!pdfReady()) return;
+  const { doc, name } = makePdf();
+  const file = new File([doc.output("blob")], name, { type: "application/pdf" });
+  try {
+    await navigator.share({ files: [file], title: name.replace(/\.pdf$/, "") });
+  } catch (e) {
+    if (e.name !== "AbortError") { $("status").classList.add("warn"); $("status").textContent = "Couldn't open sharing. Use Download PDF invoice instead."; }
+  }
+});
 
 $("copyBtn").addEventListener("click", () => {
   let text = $("message").textContent;
